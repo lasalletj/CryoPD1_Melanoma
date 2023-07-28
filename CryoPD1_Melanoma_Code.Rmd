@@ -1,0 +1,1283 @@
+---
+title: "Cryo PD-1 Melanoma"
+author: "Tom LaSalle"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache = FALSE, echo = TRUE, warning = TRUE, message = FALSE, cache.lazy = FALSE)
+```
+
+This document contains the code required to generate the single cell RNA-sequencing figures, Figures 2-3 and Supplementary Figures X and Y.
+
+Load required packages:
+
+```{r}
+library(knitr)
+library(ggplot2)
+library(RColorBrewer)
+library(plyr)
+library(dplyr)
+library(DESeq2)
+library(openxlsx)
+library(writexl)
+library(cowplot)
+library(Nebulosa)
+library(Seurat)
+library(ggpubr)
+library(fgsea)
+library(scCustomize)
+library(harmony)
+library(stringr)
+library(limma)
+library(future)
+library(fgsea)
+library(stringr)
+
+'%!in%' <- function(x,y)!('%in%'(x,y))
+```
+
+Define the color palette:
+
+```{r}
+vermillion <- NRcolor <- rgb(213,94,0,max=255)
+bluishgreen <- Rcolor <- rgb(0,158,115,max=255)
+yellow <- Ecolor <- rgb(240,228,66,max=255)
+blue <- Lcolor <- rgb(0,114,178,max=255)
+orange <- Tcolor <- rgb(230,159,0,max=255)
+skyblue <- Vcolor <- rgb(86,180,233,max=255)
+lightgray <- Culturecolor <- rgb(211,211,211,max=255)
+```
+
+## Quality Control Filtration and Doublet Exclusion
+
+The final filtered data is provided as a Seurat object, so the steps under QC filtration and Doublet exclusion are commented out.
+
+Load the unfiltered 10x expression data and perform quality control filtration:
+
+```{r}
+# data_dir <- "~/sequencing_data/filtered_feature_bc_matrices/"
+# filenams <- list.files(data_dir)
+# expression_matrices <- list()
+# 
+# #Read in the 10x expression matrices, create the Seurat object
+# for (i in 1:length(filenams)){
+#   expression_matrices[[i]] <- Read10X(data.dir = paste0(data_dir,filenams[i]))
+# }
+# Matrix_Merged <- Merge_Sparse_Data_All(matrix_list = expression_matrices, add_cell_ids = str_extract(filenams, "[^_]+"))
+# cryo <- CreateSeuratObject(counts = Matrix_Merged)
+# 
+# #Filter cells with more than 25% mitochondrial reads.
+# cryo[["percent.mt"]] <- PercentageFeatureSet(cryo, pattern = "^MT-")
+# cryo@meta.data$QC <- ifelse(cryo$percent.mt > 25, "FAIL","PASS" )
+# cryo <- subset(cryo, subset = QC == "PASS")
+# 
+# #Filter cells with less than 200 genes expressed and/or with less than 1000 reads per cell.
+# cryo@meta.data$QC <- ifelse(cryo$nFeature_RNA < 200, "FAIL","PASS" )
+# cryo <- subset(cryo, subset = QC == "PASS")
+# cryo@meta.data$QC <- ifelse(cryo$nCount_RNA < 1000, "FAIL","PASS" )
+# cryo <- subset(cryo, subset = QC == "PASS")
+# cryo$technology <- "10x"
+```
+
+Load in the SS2 counts data and quality control data from RNASeQC 2, perform QC filtration:
+
+```{r}
+# #Read in the SS2 data
+# SS2_counts <- read.table(gzfile("~/sequencing_data/full_dataset.rsem_genes_expected_count.txt.gz"),sep="\t")
+# colnames(SS2_counts) <- SS2_counts[1,]
+# SS2_counts <- SS2_counts[-1,-2]
+# genepc <- read.delim("~/sequencing_data/gencode.v32_gene_annotation_table.txt")
+# genepc$GeneSymbol <- make.names(genepc$GeneSymbol, unique = TRUE)
+# genepc <- genepc[order(genepc$gene_id),]
+# rownames(SS2_counts) <- genepc$GeneSymbol         
+# SS2_counts <- SS2_counts[,-1]
+# rownames(SS2_counts) <- sub("^MT\\.", "MT-", rownames(SS2_counts)) 
+# metadata_SS2 <- read.xlsx("~/sequencing_data/full_dataset.metrics.xlsx")
+# rownames(metadata_SS2) <- metadata_SS2$sample_id
+# metadata_SS2$sample <- rownames(metadata_SS2)
+# metadata_SS2$sample <- sub(".*?_", "", metadata_SS2$sample)
+# metadata_SS2$sample <- sub(".*?_", "", metadata_SS2$sample)
+# 
+# #Create the Seurat object
+# cryo_SS2 <- CreateSeuratObject(counts = SS2_counts, meta.data = metadata_SS2)
+# cryo_SS2$sample <- factor(cryo_SS2$sample, levels = c("Pre852CD45p","Pre512CD45n","Pre301CD45p","Pre583CD45p","Pre870CD45p","Pre870CD45n"))
+# cryo_SS2 <- SetIdent(cryo_SS2, value = "sample")
+# cryo_SS2$orig.ident <- cryo_SS2$sample
+# cryo_SS2$technology <- "SS2"
+# 
+# #Quality control of the SS2 data:
+# cryo_SS2[["percent.mt"]] <- PercentageFeatureSet(cryo_SS2, pattern = "^MT-")
+# cryo_SS2 <- subset(cryo_SS2, subset = Genes.Detected > 2000 & nCount_RNA < 1300000 & Median.3..bias > 0.3 & Median.3..bias < 0.75 & Median.Exon.CV < 1 & Exon.CV.MAD < 0.8 & Exonic.Rate > 0.35)
+```
+
+Merge the 10x and SS2 Seurat objects. Perform SCTransform on each sample, perform batch correction with Harmony, and assign initial lineages to each cluster. Remove clusters associated with the tissue of origin that are not shared with other samples, denoted "Other".
+
+```{r}
+# #Merge the objects
+# cryo <- merge(cryo, cryo_SS2, add.cell.ids = c("10x", "SS2"))
+# 
+# #Perform SCTransform on each individual sample
+# cryo.list <- SplitObject(cryo, split.by = "orig.ident")
+# for (i in 1:length(cryo.list)) {
+#     cryo.list[[i]] <- SCTransform(cryo.list[[i]], verbose = FALSE)
+#     print(i)
+# }
+# for (i in 1:length(cryo.list)) {
+#    cryo.list[[i]] <- RunPCA(cryo.list[[i]], verbose = FALSE)
+#    cryo.list[[i]] <- RunUMAP(cryo.list[[i]], dims = 1:30, verbose = FALSE)
+#    cryo.list[[i]] <- FindNeighbors(cryo.list[[i]], dims = 1:30, verbose = FALSE)
+#    cryo.list[[i]] <- FindClusters(cryo.list[[i]], verbose = FALSE)
+#    print(i)
+# }
+# 
+# #Choose initial lineage assignments
+# cryo.list[[1]]$seurat_clusters <- mapvalues(cryo.list[[1]]$seurat_clusters, from = c("0","1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16","17","18","19","20","21"), to = c("T","T","MP","MP","B","MP","NK","T","Other","Other","T","MP","Other","Endothelial","Endothelial","Fibro","Plasma","Mast","Other","Other","Other","Other"))
+# cryo.list[[2]]$seurat_clusters <- mapvalues(cryo.list[[2]]$seurat_clusters, from = c("0","1","2","3","4","5","6","7","8","9","10","11","12","13","14","15"), to = c("Melanocyte","Melanocyte","Melanocyte","Melanocyte","Melanocyte","Endothelial","T","T","Melanocyte","T","MP","Fibro","Fibro","MP","Other","Plasma"))
+# cryo.list[[3]]$seurat_clusters <- mapvalues(cryo.list[[3]]$seurat_clusters, from = c("0","1","2","3","4","5","6","7","8","9","10","11","12","13","14"), to = c("Melanocyte","Melanocyte","Melanocyte","Melanocyte","T","Melanocyte","Melanocyte","MP","Melanocyte","Melanocyte","Melanocyte","T","Melanocyte","Fibro","NK"))
+# cryo.list[[4]]$seurat_clusters <- mapvalues(cryo.list[[4]]$seurat_clusters, from = c("0","1","2","3","4","5","6","7","8"), to = c("MP","MP","T","Neu","T","T","T","MP","T"))
+# cryo.list[[5]]$seurat_clusters <- mapvalues(cryo.list[[5]]$seurat_clusters, from = c("0","1","2","3","4","5","6","7","8","9","10","11"), to = c("Melanocyte","Melanocyte","T","Melanocyte","Melanocyte","T","Melanocyte","Endothelial","MP","Fibro","T","Melanocyte"))
+# cryo.list[[6]]$seurat_clusters <- mapvalues(cryo.list[[6]]$seurat_clusters, from = c("0","1","2","3","4","5","6","7","8","9","10","11"), to = c("Melanocyte","Melanocyte","Melanocyte","Melanocyte","Melanocyte","Melanocyte","Melanocyte","Melanocyte","Melanocyte","Melanocyte","T","Fibro"))
+# cryo.list[[7]]$seurat_clusters <- mapvalues(cryo.list[[7]]$seurat_clusters, from = c("0","1","2","3","4","5","6","7","8","9"), to = c("T","Melanocyte","Melanocyte","Melanocyte","T","Melanocyte","Melanocyte","T","MP","Melanocyte"))
+# cryo.list[[8]]$seurat_clusters <- mapvalues(cryo.list[[8]]$seurat_clusters, from = c("0","1","2","3","4","5","6","7","8","9","10","11","12","13","14","15"), to = c("T","Endothelial","T","MP","Endothelial","Endothelial","Melanocyte","Other","Fibro","MP","NK","Fibro","T","Plasma","Fibro","T"))
+# cryo.list[[9]]$seurat_clusters <- mapvalues(cryo.list[[9]]$seurat_clusters, from = c("0","1","2","3","4","5","6","7","8","9"), to = c("Endothelial","T","Endothelial","T","B","Endothelial","T","MP","NK","MP"))
+# cryo.list[[10]]$seurat_clusters <- mapvalues(cryo.list[[10]]$seurat_clusters, from = c("0","1","2","3","4","5","6","7","8","9","10","11","12","13","14"), to = c("Endothelial","Endothelial","Other","T","Fibro","T","Endothelial","NK","Endothelial","Fibro","Endothelial","Plasma","Fibro","Endothelial","MP"))
+# cryo.list[[11]]$seurat_clusters <- mapvalues(cryo.list[[11]]$seurat_clusters, from = c("0","1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16","17"), to = c("T","T","Melanocyte","Melanocyte","T","T","MP","T","Melanocyte","T","T","MP","Plasma","MP","B","Endothelial","B","NK"))
+# cryo.list[[12]]$seurat_clusters <- mapvalues(cryo.list[[12]]$seurat_clusters, from = c("0","1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16","17","18","19","20"), to = c("Melanocyte","T","MP","Melanocyte","T","MP","T","T","T","NK","Other","Other","Other","Other","Melanocyte","Other","Plasma","T","Endothelial","Other","MP"))
+# cryo.list[[13]]$seurat_clusters <- mapvalues(cryo.list[[13]]$seurat_clusters, from = c("0","1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16","17","18"), to = c("T","T","Melanocyte","Melanocyte","Melanocyte","Melanocyte","MP","Melanocyte","T","T","T","T","T","T","Melanocyte","Melanocyte","T","B","Fibro"))
+# cryo.list[[14]]$seurat_clusters <- mapvalues(cryo.list[[14]]$seurat_clusters, from = c("0","1","2","3","4","5","6","7","8","9","10","11","12","13"), to = c("Melanocyte","Melanocyte","Melanocyte","Melanocyte","Melanocyte","Melanocyte","T","Melanocyte","Melanocyte","Melanocyte","Melanocyte","Melanocyte","MP","Plasma")) 
+# cryo.list[[15]]$seurat_clusters <- mapvalues(cryo.list[[15]]$seurat_clusters, from = c("0","1","2"), to = c("MP","T","Melanocyte"))
+# cryo.list[[16]]$seurat_clusters <- mapvalues(cryo.list[[16]]$seurat_clusters, from = c("0","1","2","3"), to = c("T","T","T","T"))
+# cryo.list[[17]]$seurat_clusters <- mapvalues(cryo.list[[17]]$seurat_clusters, from = c("0","1","2","3"), to = c("Melanocyte","Melanocyte","Melanocyte","Endothelial"))
+# cryo.list[[18]]$seurat_clusters <- mapvalues(cryo.list[[18]]$seurat_clusters, from = c("0","1","2"), to = c("Melanocyte","Melanocyte","Melanocyte"))
+# cryo.list[[19]]$seurat_clusters <- mapvalues(cryo.list[[19]]$seurat_clusters, from = c("0","1"), to = c("T","T"))
+# cryo.list[[20]]$seurat_clusters <- mapvalues(cryo.list[[20]]$seurat_clusters, from = c("0","1","2"), to = c("T","MP","T"))
+# cryo_merged <- merge(cryo.list[[1]], y = cryo.list[2:length(cryo.list)],  project = "cryo", merge.data = TRUE)
+# 
+# #Remove cell types not shared between anatomical sites
+# cryo_merged$celltype_indiv <- cryo_merged$seurat_clusters
+# '%!in%' <- function(x,y)!('%in%'(x,y))
+# cryo_merged <- subset(cryo_merged, subset = celltype_indiv %!in% "Other")
+```
+
+Perform SCTransform on each sample and run Harmony to merge all samples in the dataset, assign global lineage to each cluster.
+
+```{r}
+# #Perform SCTransform
+# cryo.list <- SplitObject(cryo_merged, split.by = "orig.ident")
+# for (i in 1:length(cryo.list)) {
+#     cryo.list[[i]] <- SCTransform(cryo.list[[i]], verbose = FALSE)
+#     print(i)
+# }
+# 
+# #Merge samples and run Harmony
+# cryo_merged <- merge(cryo.list[[1]], y = cryo.list[2:length(cryo.list)],  project = "cryo", merge.data = TRUE)
+# cryo.features <- SelectIntegrationFeatures(object.list = cryo.list, nfeatures = 3000)
+# VariableFeatures(cryo_merged) <- cryo.features
+# cryo_merged <- RunPCA(object = cryo_merged, assay = "SCT", npcs = 50)
+# cryo_merged <- RunHarmony(object = cryo_merged,
+#                                     assay.use = "SCT",
+#                                     reduction = "pca",
+#                                     dims.use = 1:50,
+#                                     group.by.vars = c("orig.ident","technology"),
+#                                     plot_convergence = TRUE)
+# cryo_merged <- RunUMAP(object = cryo_merged, assay = "SCT", reduction = "harmony", dims = 1:50)
+# cryo_merged <- FindNeighbors(object = cryo_merged, assay = "SCT", reduction = "harmony", dims = 1:50)
+# cryo_merged <- FindClusters(object = cryo_merged)
+# 
+# #Assign global lineages - provided as an example
+# cryo_merged$celltype_global <- mapvalues(cryo_merged$seurat_clusters, from = c("0","1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16","17","18","19","20","21","22","23","24","25","26","27","28","29"), to = c("Melanocyte","Myeloid","Melanocyte","T","T","Endothelial","T","T","T","B/Plasma","T","T","Melanocyte","T","T","Melanocyte","Stromal","T","T","Stromal","Melanocyte","T","Myeloid","Myeloid","Myeloid","B/Plasma","Melanocyte","T","T","T"))
+# cryo_merged$barcodes <- cryo_merged@assays$RNA@counts@Dimnames[[2]]
+```
+
+Next, perform subclustering of T cells, myeloid cells, melanoma cells, stromal cells, endothelial cells, and B/Plasma cells. Reassign clusters with markers of another lineage. Repeat subclustering and reassigning. Remove cells that form their own cluster after reassignment. Repeat this process until all subclusters reflect markers of the correct lineage. An example for T cell subclustering is provided below.
+
+```{r}
+# #Perform log-normalization and scaling
+# tnk_merged <- subset(cryo_merged, subset = celltype_global %in% c("T"))
+# DefaultAssay(object = tnk_merged) <- "RNA"
+# tnk_merged[['SCT']] <- NULL
+# tnk_merged <- NormalizeData(tnk_merged, verbose = FALSE) %>%
+#     FindVariableFeatures(selection.method = "vst", nfeatures = 2000) %>% 
+#     ScaleData(verbose = FALSE) %>% 
+#     RunPCA(pc.genes = pbmc@var.genes, npcs = 20, verbose = FALSE)
+# DimPlot(object = tnk_merged, reduction = "pca", pt.size = .1, group.by = "technology")
+# 
+# #Merge samples and run Harmony
+# tnk_merged <- tnk_merged %>% 
+#     RunHarmony(c("orig.ident","technology"), plot_convergence = TRUE)
+# DimPlot(object = tnk_merged, reduction = "harmony", pt.size = .1, group.by = "technology")
+# tnk_merged <- tnk_merged %>% 
+#     RunUMAP(reduction = "harmony", dims = 1:20) %>% 
+#     FindNeighbors(reduction = "harmony", dims = 1:20) %>% 
+#     FindClusters(resolution = 0.5) %>% 
+#     identity()
+# 
+# #Find cluster markers
+# plan()
+# plan("multisession", workers = 8)
+# tnk.clustermarkers <- FindAllMarkers(tnk_merged)
+# write.xlsx(tnk.clustermarkers, file = paste0("~/tnk_clustermarkers_resdefault_lognorm.xlsx"))
+# tnk.clustermarkers <- tnk.clustermarkers[tnk.clustermarkers$avg_log2FC > 0,]
+# 
+# #Annotate clusters and reassign non-T barcodes
+# tnk_merged$celltype_sub <- mapvalues(tnk_merged$seurat_clusters, from = c("0","1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16","17","18","19"), to = c("T","T","T","Unknown","T","Melanocyte","T","T","T","T","Melanocyte","T","T","T","Myeloid","T","Unknown","T","T","Unknown"))
+# t_barcodes <- tnk_merged$barcodes[tnk_merged$celltype_sub == "T"]
+# unknown_barcodes <- tnk_merged$barcodes[tnk_merged$celltype_sub == "Unknown"]
+# melanocyte_barcodes <- tnk_merged$barcodes[tnk_merged$celltype_sub == "Melanocyte"]
+# myeloid_barcodes <- tnk_merged$barcodes[tnk_merged$celltype_sub == "Myeloid"]
+```
+
+After several rounds of reassignments and filtration, subset to the singlet barcodes.
+
+```{r}
+# #Subset on singlet barcodes
+# singlet_barcodes <- read.delim("~/singlet_barcodes.txt")
+# cryo_temp <- subset(cryo_merged, subset = barcodes %in% singlet_barcodes$x)
+# 
+# #Perform SCTransform on each sample
+# cryo.list <- SplitObject(cryo_temp, split.by = "orig.ident")
+# for (i in 1:length(cryo.list)) {
+#     cryo.list[[i]] <- SCTransform(cryo.list[[i]], verbose = FALSE)
+#     print(i)
+# }
+# 
+# #Merge and run Harmony
+# cryo_merged <- merge(cryo.list[[1]], y = cryo.list[2:length(cryo.list)],  project = "cryo", merge.data = TRUE)
+# cryo.features <- SelectIntegrationFeatures(object.list = cryo.list, nfeatures = 3000)
+# VariableFeatures(cryo_merged) <- cryo.features
+# cryo_merged <- RunPCA(object = cryo_merged, assay = "SCT", npcs = 50)
+# cryo_merged <- RunHarmony(object = cryo_merged,
+#                                     assay.use = "SCT",
+#                                     reduction = "pca",
+#                                     dims.use = 1:50,
+#                                     group.by.vars = c("orig.ident","technology"),
+#                                     plot_convergence = TRUE)
+# cryo_merged <- RunUMAP(object = cryo_merged, assay = "SCT", reduction = "harmony", dims = 1:50)
+# cryo_merged <- FindNeighbors(object = cryo_merged, assay = "SCT", reduction = "harmony", dims = 1:50)
+# cryo_merged <- FindClusters(object = cryo_merged)
+```
+
+## Downstream Analyses
+
+Read in the final version.
+
+```{r}
+cryo_merged <- readRDS("~/CryoPD1_Allcells.rds")
+```
+
+Create a bar plot showing the number of cells passing QC from each sample.
+
+```{r}
+df <- as.data.frame(table(cryo_merged$orig.ident))
+df <- df[order(df$Freq,decreasing = TRUE),]
+```
+
+**Figure SXA:**
+
+```{r}
+barplot(df$Freq, las = 2, names.arg = df$Var1)
+```
+
+Plot the UMAPs built above by scRNA-seq technology, pre/post cryoablation status, and tissue of cryoablation.
+
+**Figure SXB:**
+
+```{r}
+DimPlot(cryo_merged, group.by = "technology", label = FALSE) + scale_color_manual(values = c(skyblue,yellow))
+DimPlot(cryo_merged, group.by = "treatment", label = FALSE) + scale_color_manual(values = c(orange,blue))
+DimPlot(cryo_merged, group.by = "tissue", label = FALSE) 
+```
+
+Compute the lineage markers using FindAllMarkers.
+
+```{r}
+# plan()
+# plan("multisession", workers = 8)
+# cryo_merged <- PrepSCTFindMarkers(object = cryo_merged, verbose = TRUE)
+# cryo_merged <- SetIdent(cryo_merged, value = "celltype_global")
+# cryo.lineagemarkers <- FindAllMarkers(cryo_merged)
+# write.xlsx(cryo.lineagemarkers, file = paste0("~/CryoPD1_Lineage_markers.xlsx"))
+```
+
+Next we plot the cell lineages determined by the several rounds of reclustering on the UMAP.
+
+**Figure 2C:**
+
+```{r}
+DimPlot(cryo_merged, group.by = "celltype_global", label = FALSE) 
+```
+
+Plot gene markers of each major cell lineage as density plots.
+
+```{r}
+p1 <- plot_density(cryo_merged, "PMEL")
+p2 <- plot_density(cryo_merged, "VWF")
+p3 <- plot_density(cryo_merged, "CD3E")
+p4 <- plot_density(cryo_merged, "LYZ")
+p5 <- plot_density(cryo_merged, "CD79A")
+p6 <- plot_density(cryo_merged, "COL1A1")
+```
+
+**Figure 2D:**
+
+```{r}
+plot_grid(p1,p2,p3,p4,p5,p6, ncol = 2)
+```
+
+Next, read in the clinical metadata and compute the frequency of each cell lineage as a percentage of all CD45+ (T, B, Myeloid) or CD45- (Melanoma, Fibroblast, Endothelial) cells per sample.
+
+```{r}
+metadata <- read.xlsx("~/CryoPD1_Clinical_metadata.xlsx")
+metadata[metadata == " "] <- NA
+metadata <- metadata[order(metadata$SampleID),]
+metadata$Cell_count <- table(cryo_merged$orig.ident)
+lineagecounts <- table(cryo_merged$orig.ident, cryo_merged$celltype_global)
+metadata$Stromal_count <- lineagecounts[,1]
+metadata$T_count <- lineagecounts[,2]
+metadata$BPlasma_count <- lineagecounts[,3]
+metadata$Melanocyte_count <- lineagecounts[,4]
+metadata$Myeloid_count <- lineagecounts[,5]
+metadata$Endothelial_count <- lineagecounts[,6]
+
+metadata$Melanocyte_CD45n <- metadata$Melanocyte_count / (metadata$Melanocyte_count + metadata$Endothelial_count + metadata$Stromal_count) * 100
+metadata$Endothelial_CD45n <- metadata$Endothelial_count / (metadata$Melanocyte_count + metadata$Endothelial_count + metadata$Stromal_count) * 100
+metadata$Stromal_CD45n <- metadata$Stromal_count / (metadata$Melanocyte_count + metadata$Endothelial_count + metadata$Stromal_count) * 100
+
+metadata$T_CD45p <- metadata$T_count / (metadata$T_count + metadata$BPlasma_count + metadata$Myeloid_count) * 100
+metadata$BPlasma_CD45p <- metadata$BPlasma_count / (metadata$T_count + metadata$BPlasma_count + metadata$Myeloid_count) * 100
+metadata$Myeloid_CD45p <- metadata$Myeloid_count / (metadata$T_count + metadata$BPlasma_count + metadata$Myeloid_count) * 100
+
+metadata$Best_response_post_cryo <- str_replace(metadata$Best_response_post_cryo, " ", "")
+metadata$Best_response_post_cryo <- factor(metadata$Best_response_post_cryo, levels = c("PD","SD","PR"))
+
+metadata$Ultimate_PD <- str_replace(metadata$Ultimate_PD, " ", "")
+metadata$Ultimate_PD <- factor(metadata$Ultimate_PD, levels = c("1","0"))
+```
+
+Plot the frequency of each cell lineage per sample in pre-treatment samples according to best-response post-cryoablation.
+
+```{r}
+my.cols <- brewer.pal(3,"RdBu")
+p1 <- ggplot(metadata[metadata$Tx == "Pre" & metadata$SampleID %!in% c("Pre870CD45p","Pre870CD45n") & metadata$SS2_CD45 %!in% c("CD45p"),], aes(x = (Best_response_post_cryo), y = Melanocyte_CD45n, fill = (Best_response_post_cryo))) + geom_boxplot(outlier.shape = NA) + geom_point(position = position_jitterdodge()) + scale_fill_manual(values = c(my.cols[1], my.cols[3], "grey")) + theme_bw() + theme(legend.position = "none") + stat_compare_means() + xlab("Best Response Post-Cryo") + scale_y_continuous(limits = c(0,100))
+p2 <- ggplot(metadata[metadata$Tx == "Pre" & metadata$SampleID %!in% c("Pre870CD45p","Pre870CD45n") & metadata$SS2_CD45 %!in% c("CD45p"),], aes(x = (Best_response_post_cryo), y = Endothelial_CD45n, fill = (Best_response_post_cryo))) + geom_boxplot(outlier.shape = NA) + geom_point(position = position_jitterdodge()) + scale_fill_manual(values = c(my.cols[1], my.cols[3], "grey")) + theme_bw() + theme(legend.position = "none") + stat_compare_means() + xlab("Best Response Post-Cryo") + scale_y_continuous(limits = c(0,100))
+p3 <- ggplot(metadata[metadata$Tx == "Pre" & metadata$SampleID %!in% c("Pre870CD45p","Pre870CD45n") & metadata$SS2_CD45 %!in% c("CD45p"),], aes(x = (Best_response_post_cryo), y = Stromal_CD45n, fill = (Best_response_post_cryo))) + geom_boxplot(outlier.shape = NA) + geom_point(position = position_jitterdodge()) + scale_fill_manual(values = c(my.cols[1], my.cols[3], "grey")) + theme_bw() + theme(legend.position = "none") + stat_compare_means() + xlab("Best Response Post-Cryo") + scale_y_continuous(limits = c(0,100))
+p4 <- ggplot(metadata[metadata$Tx == "Pre" & metadata$SampleID %!in% c("Pre870CD45p","Pre870CD45n") & metadata$SS2_CD45 %!in% c("CD45n"),], aes(x = (Best_response_post_cryo), y = T_CD45p, fill = (Best_response_post_cryo))) + geom_boxplot(outlier.shape = NA) + geom_point(position = position_jitterdodge()) + scale_fill_manual(values = c(my.cols[1], my.cols[3], "grey")) + theme_bw() + theme(legend.position = "none") + stat_compare_means() + xlab("Best Response Post-Cryo") + scale_y_continuous(limits = c(0,100))
+p5 <- ggplot(metadata[metadata$Tx == "Pre" & metadata$SampleID %!in% c("Pre870CD45p","Pre870CD45n") & metadata$SS2_CD45 %!in% c("CD45n"),], aes(x = (Best_response_post_cryo), y = BPlasma_CD45p, fill = (Best_response_post_cryo))) + geom_boxplot(outlier.shape = NA) + geom_point(position = position_jitterdodge()) + scale_fill_manual(values = c(my.cols[1], my.cols[3], "grey")) + theme_bw() + theme(legend.position = "none") + stat_compare_means() + xlab("Best Response Post-Cryo") + scale_y_continuous(limits = c(0,100))
+p6 <- ggplot(metadata[metadata$Tx == "Pre" & metadata$SampleID %!in% c("Pre870CD45p","Pre870CD45n") & metadata$SS2_CD45 %!in% c("CD45n"),], aes(x = (Best_response_post_cryo), y = Myeloid_CD45p, fill = (Best_response_post_cryo))) + geom_boxplot(outlier.shape = NA) + geom_point(position = position_jitterdodge()) + scale_fill_manual(values = c(my.cols[1], my.cols[3], "grey")) + theme_bw() + theme(legend.position = "none") + stat_compare_means() + xlab("Best Response Post-Cryo") + scale_y_continuous(limits = c(0,100))
+```
+
+**Figure 2E:**
+
+```{r}
+plot_grid(p1,p2,p3,ncol=3)
+plot_grid(p4,p5,p6,ncol=3)
+```
+
+Repeat the comparison for ultimate progressive disease vs. no progression.
+
+```{r}
+p1 <- ggplot(metadata[metadata$Tx == "Pre" & metadata$SampleID %!in% c("Pre870CD45p","Pre870CD45n") & metadata$SS2_CD45 %!in% c("CD45p"),], aes(x = (Ultimate_PD), y = Melanocyte_CD45n, fill = (Ultimate_PD))) + geom_boxplot(outlier.shape = NA) + geom_point(position = position_jitterdodge()) + scale_fill_manual(values = c(vermillion, "gray")) + theme_bw() + theme(legend.position = "none") + stat_compare_means() + xlab("Ultimate PD") + scale_y_continuous(limits = c(0,100))
+p2 <- ggplot(metadata[metadata$Tx == "Pre" & metadata$SampleID %!in% c("Pre870CD45p","Pre870CD45n") & metadata$SS2_CD45 %!in% c("CD45p"),], aes(x = (Ultimate_PD), y = Endothelial_CD45n, fill = (Ultimate_PD))) + geom_boxplot(outlier.shape = NA) + geom_point(position = position_jitterdodge()) + scale_fill_manual(values = c(vermillion, "gray")) + theme_bw() + theme(legend.position = "none") + stat_compare_means() + xlab("Ultimate PD") + scale_y_continuous(limits = c(0,100))
+p3 <- ggplot(metadata[metadata$Tx == "Pre" & metadata$SampleID %!in% c("Pre870CD45p","Pre870CD45n") & metadata$SS2_CD45 %!in% c("CD45p"),], aes(x = (Ultimate_PD), y = Stromal_CD45n, fill = (Ultimate_PD))) + geom_boxplot(outlier.shape = NA) + geom_point(position = position_jitterdodge()) + scale_fill_manual(values = c(vermillion, "gray")) + theme_bw() + theme(legend.position = "none") + stat_compare_means() + xlab("Ultimate PD") + scale_y_continuous(limits = c(0,100))
+p4 <- ggplot(metadata[metadata$Tx == "Pre" & metadata$SampleID %!in% c("Pre870CD45p","Pre870CD45n") & metadata$SS2_CD45 %!in% c("CD45n"),], aes(x = (Ultimate_PD), y = T_CD45p, fill = (Ultimate_PD))) + geom_boxplot(outlier.shape = NA) + geom_point(position = position_jitterdodge()) + scale_fill_manual(values = c(vermillion, "gray")) + theme_bw() + theme(legend.position = "none") + stat_compare_means() + xlab("Ultimate PD") + scale_y_continuous(limits = c(0,100))
+p5 <- ggplot(metadata[metadata$Tx == "Pre" & metadata$SampleID %!in% c("Pre870CD45p","Pre870CD45n") & metadata$SS2_CD45 %!in% c("CD45n"),], aes(x = (Ultimate_PD), y = BPlasma_CD45p, fill = (Ultimate_PD))) + geom_boxplot(outlier.shape = NA) + geom_point(position = position_jitterdodge()) + scale_fill_manual(values = c(vermillion, "gray")) + theme_bw() + theme(legend.position = "none") + stat_compare_means() + xlab("Ultimate PD") + scale_y_continuous(limits = c(0,100))
+p6 <- ggplot(metadata[metadata$Tx == "Pre" & metadata$SampleID %!in% c("Pre870CD45p","Pre870CD45n") & metadata$SS2_CD45 %!in% c("CD45n"),], aes(x = (Ultimate_PD), y = Myeloid_CD45p, fill = (Ultimate_PD))) + geom_boxplot(outlier.shape = NA) + geom_point(position = position_jitterdodge()) + scale_fill_manual(values = c(vermillion, "gray")) + theme_bw() + theme(legend.position = "none") + stat_compare_means() + xlab("Ultimate PD") + scale_y_continuous(limits = c(0,100))
+```
+
+**Figure 2E:**
+
+```{r}
+plot_grid(p1,p2,p3,ncol=3)
+plot_grid(p4,p5,p6,ncol=3)
+```
+
+Next we will focus on the T cell compartment. Subset the Seurat object on T cells, perform re-normalization using log-normalization, scale and harmonize the datasets, perform dimensionality reduction and clustering.
+
+```{r}
+# tnk_merged <- subset(cryo_merged, subset = celltype_global %in% c("T"))
+# tnk_merged$barcodes <- tnk_merged@assays$RNA@counts@Dimnames[[2]]
+# DefaultAssay(object = tnk_merged) <- "RNA"
+# tnk_merged[['SCT']] <- NULL
+# tnk_merged <- NormalizeData(tnk_merged, verbose = FALSE) %>%
+#     FindVariableFeatures(selection.method = "vst", nfeatures = 2000) %>% 
+#     ScaleData(verbose = FALSE) %>% 
+#     RunPCA(pc.genes = pbmc@var.genes, npcs = 20, verbose = FALSE)
+# DimPlot(object = tnk_merged, reduction = "pca", pt.size = .1, group.by = "technology")
+# 
+# tnk_merged <- tnk_merged %>% 
+#     RunHarmony(c("orig.ident","technology"), plot_convergence = TRUE)
+# DimPlot(object = tnk_merged, reduction = "harmony", pt.size = .1, group.by = "technology")
+# 
+# tnk_merged <- tnk_merged %>% 
+#     RunUMAP(reduction = "harmony", dims = 1:9) %>% 
+#     FindNeighbors(reduction = "harmony", dims = 1:9) %>% 
+#     FindClusters(resolution = 0.4) %>% 
+#     identity()
+# 
+# s.genes <- cc.genes$s.genes
+# g2m.genes <- cc.genes$g2m.genes
+# tnk_merged <- CellCycleScoring(tnk_merged, s.features = s.genes, g2m.features = g2m.genes)
+```
+
+Read in the final version.
+
+```{r}
+tnk_merged <- readRDS("~/CryoPD1_Tcells.rds")
+```
+
+Plot the UMAP of the T cell subclusters.
+
+**Figure 3A:**
+
+```{r}
+DimPlot(tnk_merged, group.by = "seurat_clusters", label = TRUE)
+```
+
+Plot the distribution of the T cell subclusters across each patient sample.
+
+```{r}
+metadata_order <- metadata[order(metadata$Tx, metadata$Best_response_post_cryo),]
+
+tnk_merged$orig.ident <- factor(tnk_merged$orig.ident, levels = c(metadata_order$SampleID))
+coul <- brewer.pal(8, "PRGn")
+coul <- colorRampPalette(coul)(16)
+```
+
+**Figure SYA (Edited in Adobe Illustrator):**
+
+```{r}
+barplot(t(table(tnk_merged$orig.ident, tnk_merged$seurat_clusters)/rowSums(table(tnk_merged$orig.ident, tnk_merged$seurat_clusters))), col = coul)
+colnames(t(table(tnk_merged$orig.ident, tnk_merged$seurat_clusters)/rowSums(table(tnk_merged$orig.ident, tnk_merged$seurat_clusters))))
+```
+
+Next, plot the frequency of selected T cell clusters across best-response to cryo-ablation categories for pre-treatment samples.
+
+```{r}
+metadata_tnk <- metadata[metadata$Tx == "Pre" & metadata$SampleID %!in% c("Pre870CD45p", "Pre870CD45n") & metadata$SS2_CD45 %!in% c("CD45n"),]
+metadata_tnk <- metadata_tnk[order(metadata_tnk$SampleID),]
+tnk_temp <- subset(tnk_merged, subset = orig.ident %in% metadata_tnk$SampleID)
+tnk_temp$orig.ident <- factor(tnk_temp$orig.ident, levels = metadata_tnk$SampleID)
+metadata_tnk$Cell_count <- table(tnk_temp$orig.ident)
+lineagecounts <- table(tnk_temp$orig.ident, tnk_temp$seurat_clusters)
+
+metadata_tnk$C0 <- lineagecounts[,1] / metadata_tnk$Cell_count * 100
+metadata_tnk$C1 <- lineagecounts[,2] / metadata_tnk$Cell_count * 100
+metadata_tnk$C2 <- lineagecounts[,3] / metadata_tnk$Cell_count * 100
+metadata_tnk$C3 <- lineagecounts[,4] / metadata_tnk$Cell_count * 100
+metadata_tnk$C4 <- lineagecounts[,5] / metadata_tnk$Cell_count * 100
+metadata_tnk$C5 <- lineagecounts[,6] / metadata_tnk$Cell_count * 100
+metadata_tnk$C6 <- lineagecounts[,7] / metadata_tnk$Cell_count * 100
+metadata_tnk$C7 <- lineagecounts[,8] / metadata_tnk$Cell_count * 100
+metadata_tnk$C8 <- lineagecounts[,9] / metadata_tnk$Cell_count * 100
+metadata_tnk$C9 <- lineagecounts[,10] / metadata_tnk$Cell_count * 100
+metadata_tnk$C10 <- lineagecounts[,11] / metadata_tnk$Cell_count * 100
+metadata_tnk$C11 <- lineagecounts[,12] / metadata_tnk$Cell_count * 100
+metadata_tnk$C12 <- lineagecounts[,13] / metadata_tnk$Cell_count * 100
+metadata_tnk$C13 <- lineagecounts[,14] / metadata_tnk$Cell_count * 100
+metadata_tnk$C14 <- lineagecounts[,15] / metadata_tnk$Cell_count * 100
+metadata_tnk$C15 <- lineagecounts[,16] / metadata_tnk$Cell_count * 100
+
+metadata_tnk$Best_response_post_cryo <- str_replace(metadata_tnk$Best_response_post_cryo, " ", "")
+
+p1 <- ggplot(metadata_tnk[metadata_tnk$Best_response_post_cryo %in% c("PD","SD","PR"),], aes(x = factor(Best_response_post_cryo, levels = c("PD","SD","PR")), y = C0, fill = factor(Best_response_post_cryo))) + geom_boxplot(outlier.shape = NA) + geom_point(position = position_jitterdodge()) + theme_bw() + theme(legend.position = "none") + stat_compare_means() + xlab("Best Response Post-Cryo")
+p2 <- ggplot(metadata_tnk[metadata_tnk$Best_response_post_cryo %in% c("PD","SD","PR"),], aes(x = factor(Best_response_post_cryo, levels = c("PD","SD","PR")), y = C1, fill = factor(Best_response_post_cryo))) + geom_boxplot(outlier.shape = NA) + geom_point(position = position_jitterdodge()) + theme_bw() + theme(legend.position = "none") + stat_compare_means() + xlab("Best Response Post-Cryo")
+p3 <- ggplot(metadata_tnk[metadata_tnk$Best_response_post_cryo %in% c("PD","SD","PR"),], aes(x = factor(Best_response_post_cryo, levels = c("PD","SD","PR")), y = C3, fill = factor(Best_response_post_cryo))) + geom_boxplot(outlier.shape = NA) + geom_point(position = position_jitterdodge()) + theme_bw() + theme(legend.position = "none") + stat_compare_means() + xlab("Best Response Post-Cryo")
+p4 <- ggplot(metadata_tnk[metadata_tnk$Best_response_post_cryo %in% c("PD","SD","PR"),], aes(x = factor(Best_response_post_cryo, levels = c("PD","SD","PR")), y = C4, fill = factor(Best_response_post_cryo))) + geom_boxplot(outlier.shape = NA) + geom_point(position = position_jitterdodge()) + theme_bw() + theme(legend.position = "none") + stat_compare_means() + xlab("Best Response Post-Cryo")
+p5 <- ggplot(metadata_tnk[metadata_tnk$Best_response_post_cryo %in% c("PD","SD","PR"),], aes(x = factor(Best_response_post_cryo, levels = c("PD","SD","PR")), y = C5, fill = factor(Best_response_post_cryo))) + geom_boxplot(outlier.shape = NA) + geom_point(position = position_jitterdodge()) + theme_bw() + theme(legend.position = "none") + stat_compare_means() + xlab("Best Response Post-Cryo")
+p6 <- ggplot(metadata_tnk[metadata_tnk$Best_response_post_cryo %in% c("PD","SD","PR"),], aes(x = factor(Best_response_post_cryo, levels = c("PD","SD","PR")), y = C6, fill = factor(Best_response_post_cryo))) + geom_boxplot(outlier.shape = NA) + geom_point(position = position_jitterdodge()) + theme_bw() + theme(legend.position = "none") + stat_compare_means() + xlab("Best Response Post-Cryo")
+p7 <- ggplot(metadata_tnk[metadata_tnk$Best_response_post_cryo %in% c("PD","SD","PR"),], aes(x = factor(Best_response_post_cryo, levels = c("PD","SD","PR")), y = C10, fill = factor(Best_response_post_cryo))) + geom_boxplot(outlier.shape = NA) + geom_point(position = position_jitterdodge()) + theme_bw() + theme(legend.position = "none") + stat_compare_means() + xlab("Best Response Post-Cryo")
+p8 <- ggplot(metadata_tnk[metadata_tnk$Best_response_post_cryo %in% c("PD","SD","PR"),], aes(x = factor(Best_response_post_cryo, levels = c("PD","SD","PR")), y = C11, fill = factor(Best_response_post_cryo))) + geom_boxplot(outlier.shape = NA) + geom_point(position = position_jitterdodge()) + theme_bw() + theme(legend.position = "none") + stat_compare_means() + xlab("Best Response Post-Cryo")
+```
+
+**Figure 3B:**
+
+```{r}
+plot_grid(p1,p2,p3,p4,p5,p6,p7,p8,ncol=8)
+```
+
+Compute the gene markers for each cluster.
+
+```{r}
+plan()
+plan("multisession", workers = 8)
+tnk.clustermarkers <- FindAllMarkers(tnk_merged)
+write.xlsx(tnk.clustermarkers, file = paste0("~/CryoPD1_Tcell_markers.xlsx"))
+```
+
+Next we perform differential expression analyses between categories of response. First we test ultimate progressive disease vs. no progression in pre-treatment samples. To do this, we "pseudobulk" the samples by adding all the gene counts for all T cells from the same sample. Then we use DESeq2 for differential expression.
+
+```{r}
+tnk_pseudobulk_counts <- matrix(0L, nrow = nrow(tnk_merged@assays$RNA@counts), ncol = length(unique(tnk_merged$orig.ident)))
+rownames(tnk_pseudobulk_counts) <- tnk_merged@assays$RNA@counts@Dimnames[[1]]
+colnames(tnk_pseudobulk_counts) <- unique(tnk_merged$orig.ident)
+
+for (i in 1:ncol(tnk_pseudobulk_counts)){
+  temp <- subset(tnk_merged, subset = orig.ident == colnames(tnk_pseudobulk_counts)[i])
+  tnk_pseudobulk_counts[,i] <- rowSums(temp@assays$RNA@counts)
+  print(i)
+}
+
+tnk_pseudobulk_counts <- tnk_pseudobulk_counts[,order(colnames(tnk_pseudobulk_counts))]
+
+metadata_temp <- metadata[metadata$Tx == "Pre" & metadata$SampleID %in% colnames(tnk_pseudobulk_counts),]
+metadata_temp <- metadata_temp[complete.cases(metadata_temp$Ultimate_PD),]
+metadata_temp <- metadata_temp[order(metadata_temp$SampleID),]
+metadata_temp$Ultimate_PD <- factor(metadata_temp$Ultimate_PD, levels = c("0","1"))
+metadata_temp$Best_response_post_cryo <- str_replace(metadata_temp$Best_response_post_cryo, " ", "")
+metadata_temp$Best_response_post_cryo <- factor(metadata_temp$Best_response_post_cryo)
+
+tnk_pseudobulk_counts <- tnk_pseudobulk_counts[,colnames(tnk_pseudobulk_counts) %in% metadata_temp$SampleID]
+tnk_pseudobulk_counts <- round(tnk_pseudobulk_counts)
+
+dds <- DESeqDataSetFromMatrix(countData = tnk_pseudobulk_counts, colData = metadata_temp, design = ~ Ultimate_PD)
+dds <- DESeq(dds)
+res <- as.data.frame(results(dds, name="Ultimate_PD_1_vs_0"))
+filenam <- "Tcell_Pre_UltimatePD_1_vs_0"
+
+res$rank <- sign(res$log2FoldChange)*(-1)*log10(res$pvalue)
+res <- res[complete.cases(res),]
+res_sig <- res[res$padj < 0.05,]
+write.table(res,paste0("~/DESeq2/",filenam,".txt"),sep = "\t")
+```
+
+```{r}
+res <- read.delim("~/DESeq2/Tcell_Pre_UltimatePD_1_vs_0.txt", sep = "\t")
+resordered <- res[order(res$rank),]
+
+log2fc <- as.numeric(resordered$log2FoldChange)
+log10p <- as.numeric(-1*log10(resordered$pvalue))
+padj <- resordered$padj
+rank <- resordered$rank
+symbol <- resordered$symbol
+combo <- cbind(log2fc,log10p,padj,rank)
+colnames(combo) <- c("log2fc","log10p","padj","rank")
+rownames(combo) <- rownames(resordered)
+combo <- as.data.frame(combo)
+combo$rank <- as.numeric(combo$rank)
+combo$log10p <- as.numeric(combo$log10p)
+combo$log2fc <- as.numeric(combo$log2fc)
+combo$significance <- as.numeric(combo$padj < 0.05)
+combo$significance <- as.factor(combo$significance)
+combo$symbol <- rownames(combo)
+
+combo$color <- 0
+combo$color[combo$significance == 1] <- 1
+
+combo$labels <- 0
+combo$labels[combo$color == 1] <- 1
+combo$labels <- as.factor(combo$labels)
+
+library(ggrepel)
+options(ggrepel.max.overlaps = Inf)
+my.cols <- brewer.pal(3,"Set2")
+plot1 <- ggplot(combo, aes(x = log2fc, y = log10p)) + geom_point(data = subset(combo, log2fc > 0 & color == 1), colour = my.cols[1]) + geom_point(data = subset(combo, log2fc < 0 & color == 1), colour = my.cols[2]) + geom_point(data = subset(combo, color == 0), colour = "grey") + geom_text_repel(data = subset(combo, labels == 1), aes(label = as.character(symbol)))  + theme_bw() + ylab("-Log10(p-value)") + xlab("Log2(FC)") + annotate("text", x=1.3, y=0, label= "No PD", colour = my.cols[1]) + annotate("text", x=-1.2, y=0, label= "PD", colour = my.cols[2]) + theme(panel.grid = element_blank()) + scale_x_continuous(breaks = seq(-30, 15, by = 5)) + scale_y_continuous(breaks = seq(0, 25, by = 5))
+```
+
+**Figure not included:**
+
+```{r}
+plot1
+```
+
+As we can see there are no significant hits for Ultimate PD in the T cell compartment. Next we compare T cells across categories of benefit from cryoablation (PD vs. SD+PR).
+
+```{r}
+metadata_temp$benefit <- factor(metadata_temp$Best_response_post_cryo %in% c("SD","PR"))
+
+dds <- DESeqDataSetFromMatrix(countData = tnk_pseudobulk_counts, colData = metadata_temp, design = ~ benefit)
+dds <- DESeq(dds)
+res <- as.data.frame(results(dds, name="benefit_TRUE_vs_FALSE"))
+filenam <- "Tcell_Pre_benefit_TRUE_vs_FALSE"
+
+res$rank <- sign(res$log2FoldChange)*(-1)*log10(res$pvalue)
+res <- res[complete.cases(res),]
+res_sig <- res[res$padj < 0.05,]
+write.table(res,paste0("~/DESeq2/",filenam,".txt"),sep = "\t")
+```
+
+```{r}
+res <- read.delim("~/DESeq2/Tcell_Pre_benefit_TRUE_vs_FALSE.txt", sep = "\t")
+resordered <- res[order(res$rank),]
+
+log2fc <- as.numeric(resordered$log2FoldChange)
+log10p <- as.numeric(-1*log10(resordered$pvalue))
+padj <- resordered$padj
+rank <- resordered$rank
+symbol <- resordered$symbol
+combo <- cbind(log2fc,log10p,padj,rank)
+colnames(combo) <- c("log2fc","log10p","padj","rank")
+rownames(combo) <- rownames(resordered)
+combo <- as.data.frame(combo)
+combo$rank <- as.numeric(combo$rank)
+combo$log10p <- as.numeric(combo$log10p)
+combo$log2fc <- as.numeric(combo$log2fc)
+combo$significance <- as.numeric(combo$padj < 0.05)
+combo$significance <- as.factor(combo$significance)
+combo$symbol <- rownames(combo)
+
+combo$color <- 0
+combo$color[combo$significance == 1] <- 1
+
+combo$labels <- 0
+combo$labels[combo$color == 1] <- 1
+combo$labels <- as.factor(combo$labels)
+
+library(ggrepel)
+options(ggrepel.max.overlaps = Inf)
+my.cols <- brewer.pal(3,"Set2")
+plot1 <- ggplot(combo, aes(x = log2fc, y = log10p)) + geom_point(data = subset(combo, log2fc > 0 & color == 1), colour = my.cols[1]) + geom_point(data = subset(combo, log2fc < 0 & color == 1), colour = my.cols[2]) + geom_point(data = subset(combo, color == 0), colour = "grey") + geom_text_repel(data = subset(combo, labels == 1), aes(label = as.character(symbol)))  + theme_bw() + ylab("-Log10(p-value)") + xlab("Log2(FC)") + annotate("text", x=1.3, y=0, label= "SD+PR", colour = my.cols[1]) + annotate("text", x=-1.2, y=0, label= "PD", colour = my.cols[2]) + theme(panel.grid = element_blank()) + scale_x_continuous(breaks = seq(-30, 15, by = 5)) + scale_y_continuous(breaks = seq(0, 25, by = 5))
+```
+
+**Figure SYB:**
+
+```{r}
+plot1
+```
+
+Next we plot some of the counts to visualize the difference between Best response categories.
+
+**Figure 3C:**
+
+```{r}
+plotCounts(dds, "TXK", intgroup = "Best_response_post_cryo", normalized = TRUE, transform = TRUE, xlab = "group")
+plotCounts(dds, "ADAMTS1", intgroup = "Best_response_post_cryo", normalized = TRUE, transform = TRUE, xlab = "group")
+plotCounts(dds, "GNAL", intgroup = "Best_response_post_cryo", normalized = TRUE, transform = TRUE, xlab = "group")
+plotCounts(dds, "TK1", intgroup = "Best_response_post_cryo", normalized = TRUE, transform = TRUE, xlab = "group")
+plotCounts(dds, "FAM166B", intgroup = "Best_response_post_cryo", normalized = TRUE, transform = TRUE, xlab = "group")
+plotCounts(dds, "ACTG2", intgroup = "Best_response_post_cryo", normalized = TRUE, transform = TRUE, xlab = "group")
+```
+
+We also calculate the statistics for the differentially expressed genes between PD and SD categories of Best response post-cryo.
+
+```{r}
+metadata_temp <- metadata_temp[metadata_temp$Best_response_post_cryo %in% c("SD","PD"),]
+tnk_pseudobulk_counts <- tnk_pseudobulk_counts[,colnames(tnk_pseudobulk_counts) %in% metadata_temp$SampleID]
+metadata_temp$Best_response_post_cryo <- factor(metadata_temp$Best_response_post_cryo, levels = c("PD","SD"))
+
+dds <- DESeqDataSetFromMatrix(countData = tnk_pseudobulk_counts, colData = metadata_temp, design = ~ Best_response_post_cryo)
+dds <- DESeq(dds)
+res <- as.data.frame(results(dds, name="Best_response_post_cryo_SD_vs_PD"))
+filenam <- "Tcell_Pre_Best_response_post_cryo_SD_vs_PD"
+
+res$rank <- sign(res$log2FoldChange)*(-1)*log10(res$pvalue)
+res <- res[complete.cases(res),]
+res_sig <- res[res$padj < 0.05,]
+write.table(res,paste0("~/DESeq2/",filenam,".txt"),sep = "\t")
+```
+
+```{r}
+res <- read.delim("~/DESeq2/Tcell_Pre_Best_response_post_cryo_SD_vs_PD.txt", sep = "\t")
+resordered <- res[order(res$rank),]
+
+log2fc <- as.numeric(resordered$log2FoldChange)
+log10p <- as.numeric(-1*log10(resordered$pvalue))
+padj <- resordered$padj
+rank <- resordered$rank
+symbol <- resordered$symbol
+combo <- cbind(log2fc,log10p,padj,rank)
+colnames(combo) <- c("log2fc","log10p","padj","rank")
+rownames(combo) <- rownames(resordered)
+combo <- as.data.frame(combo)
+combo$rank <- as.numeric(combo$rank)
+combo$log10p <- as.numeric(combo$log10p)
+combo$log2fc <- as.numeric(combo$log2fc)
+combo$significance <- as.numeric(combo$padj < 0.05)
+combo$significance <- as.factor(combo$significance)
+combo$symbol <- rownames(combo)
+
+combo$color <- 0
+combo$color[combo$significance == 1] <- 1
+
+combo$labels <- 0
+combo$labels[combo$color == 1] <- 1
+combo$labels <- as.factor(combo$labels)
+
+library(ggrepel)
+options(ggrepel.max.overlaps = Inf)
+my.cols <- brewer.pal(3,"RdBu")
+plot1 <- ggplot(combo, aes(x = log2fc, y = log10p)) + geom_point(data = subset(combo, log2fc > 0 & color == 1), colour = my.cols[3]) + geom_point(data = subset(combo, log2fc < 0 & color == 1), colour = my.cols[1]) + geom_point(data = subset(combo, color == 0), colour = "grey") + geom_text_repel(data = subset(combo, labels == 1), aes(label = as.character(symbol)))  + theme_bw() + ylab("-Log10(p-value)") + xlab("Log2(FC)") + annotate("text", x=1.3, y=0, label= "SD", colour = my.cols[3]) + annotate("text", x=-1.2, y=0, label= "PD", colour = my.cols[1]) + theme(panel.grid = element_blank()) + scale_x_continuous(breaks = seq(-30, 15, by = 5)) + scale_y_continuous(breaks = seq(0, 30, by = 5))
+```
+
+**Figure SYC:**
+
+```{r}
+plot1
+```
+
+Next we run fgsea to determine pathway enrichment for the differentially expressed genes between cryoablation benefit categories.
+
+```{r, cache = TRUE, warning = FALSE}
+resgsea <- read.delim("~/DESeq2/Tcell_Pre_benefit_TRUE_vs_FALSE.txt",sep = "\t")
+
+ranking <- resgsea[,"rank"]
+names(ranking) <- rownames(resgsea)
+
+allgenesetgmt.file <- c(gmtPathways("~/gsea_gene_sets.gmt"))
+set.seed(15001)
+allgenesetfgseaRes <- fgsea(pathways = allgenesetgmt.file, 
+                  stats = ranking,
+                  minSize=10,
+                  maxSize=5000,
+                  eps = 0)
+allgenesetfgseaRes$LeadingEdgeGenes <- matrix(0L, nrow = nrow(allgenesetfgseaRes), ncol = 1)
+for (i in 1:nrow(allgenesetfgseaRes)){
+  allgenesetfgseaRes$LeadingEdgeGenes[i] <- as.character(paste(unlist(allgenesetfgseaRes$leadingEdge[i]), collapse = ", "))
+}
+allgenesetfgseaRes <- allgenesetfgseaRes[rev(order(allgenesetfgseaRes$NES)),]
+
+sheets <- list("PATHWAYS_GSEA" = allgenesetfgseaRes[,c(1,2,3,4,5,6,7,9)]) 
+write_xlsx(sheets, "~/GSEA_Tcell_Pre_benefit_TRUE_vs_FALSE.xlsx")
+```
+
+```{r}
+allgenesetfgseaRes <- readxl::read_xlsx("~/GSEA_Tcell_Pre_benefit_TRUE_vs_FALSE.xlsx")
+allgenesetfgseaResselect <- allgenesetfgseaRes[allgenesetfgseaRes$pathway %in% c("GO_CELLULAR_RESPONSE_TO_LIPOPROTEIN_PARTICLE_STIMULUS","GO_POSITIVE_REGULATION_OF_LEUKOCYTE_DEGRANULATION","GO_CELLULAR_EXTRAVASATION","GO_INOSITOL_PHOSPHATE_METABOLIC_PROCESS","HALLMARK_E2F_TARGETS","HALLMARK_G2M_CHECKPOINT","HALLMARK_MYC_TARGETS_V1","HALLMARK_OXIDATIVE_PHOSPHORYLATION"),]
+allgenesetfgseaResselect$idx <- rev(1:nrow(allgenesetfgseaResselect))
+allgenesetfgseaResselect$sign <- allgenesetfgseaResselect$NES > 0
+allgenesetfgseaResselect$sign <- mapvalues(allgenesetfgseaResselect$sign, from = c("FALSE","TRUE"), to = c("PD","SD"))
+
+my.cols <- brewer.pal(3,"RdBu")
+```
+
+**Figure 3D:**
+
+```{r}
+ggplot(allgenesetfgseaResselect, aes(x = factor(idx), y = NES)) + geom_col(aes(fill = sign)) + coord_flip() + theme_bw() + theme(panel.grid = element_blank()) + scale_fill_manual(values = c(my.cols[1], my.cols[3]))
+```
+
+We also run GSEA for the other comparisons.
+
+Next we run fgsea to determine pathway enrichment for the differentially expressed genes between cryoablation benefit categories.
+
+```{r, cache = TRUE, warning = FALSE}
+resgsea <- read.delim("~/DESeq2/Tcell_Pre_UltimatePD_1_vs_0.txt",sep = "\t")
+
+ranking <- resgsea[,"rank"]
+names(ranking) <- rownames(resgsea)
+
+allgenesetgmt.file <- c(gmtPathways("~/gsea_gene_sets.gmt"))
+set.seed(15001)
+allgenesetfgseaRes <- fgsea(pathways = allgenesetgmt.file, 
+                  stats = ranking,
+                  minSize=10,
+                  maxSize=5000,
+                  eps = 0)
+allgenesetfgseaRes$LeadingEdgeGenes <- matrix(0L, nrow = nrow(allgenesetfgseaRes), ncol = 1)
+for (i in 1:nrow(allgenesetfgseaRes)){
+  allgenesetfgseaRes$LeadingEdgeGenes[i] <- as.character(paste(unlist(allgenesetfgseaRes$leadingEdge[i]), collapse = ", "))
+}
+allgenesetfgseaRes <- allgenesetfgseaRes[rev(order(allgenesetfgseaRes$NES)),]
+
+sheets <- list("PATHWAYS_GSEA" = allgenesetfgseaRes[,c(1,2,3,4,5,6,7,9)]) 
+write_xlsx(sheets, "~/GSEA_Tcell_Pre_UltimatePD_1_vs_0.xlsx")
+
+resgsea <- read.delim("~/DESeq2/Tcell_Pre_Best_response_post_cryo_SD_vs_PD.txt",sep = "\t")
+
+ranking <- resgsea[,"rank"]
+names(ranking) <- rownames(resgsea)
+
+allgenesetgmt.file <- c(gmtPathways("~/gsea_gene_sets.gmt"))
+set.seed(15001)
+allgenesetfgseaRes <- fgsea(pathways = allgenesetgmt.file, 
+                  stats = ranking,
+                  minSize=10,
+                  maxSize=5000,
+                  eps = 0)
+allgenesetfgseaRes$LeadingEdgeGenes <- matrix(0L, nrow = nrow(allgenesetfgseaRes), ncol = 1)
+for (i in 1:nrow(allgenesetfgseaRes)){
+  allgenesetfgseaRes$LeadingEdgeGenes[i] <- as.character(paste(unlist(allgenesetfgseaRes$leadingEdge[i]), collapse = ", "))
+}
+allgenesetfgseaRes <- allgenesetfgseaRes[rev(order(allgenesetfgseaRes$NES)),]
+
+sheets <- list("PATHWAYS_GSEA" = allgenesetfgseaRes[,c(1,2,3,4,5,6,7,9)]) 
+write_xlsx(sheets, "~/GSEA_Tcell_Pre_Best_response_post_cryo_SD_vs_PD.xlsx")
+```
+
+Next we turn to the myeloid compartment. Subset the Seurat object on myeloid cells, perform re-normalization using log-normalization, scale and harmonize the datasets, perform dimensionality reduction and clustering.
+
+```{r}
+# myeloid_merged <- subset(cryo_merged, subset = celltype_global %in% c("Myeloid"))
+# myeloid_merged$barcodes <- myeloid_merged@assays$RNA@counts@Dimnames[[2]]
+# DefaultAssay(object = myeloid_merged) <- "RNA"
+# myeloid_merged[['SCT']] <- NULL
+# myeloid_merged <- NormalizeData(myeloid_merged, verbose = FALSE) %>%
+#     FindVariableFeatures(selection.method = "vst", nfeatures = 2000) %>% 
+#     ScaleData(verbose = FALSE) %>% 
+#     RunPCA(pc.genes = pbmc@var.genes, npcs = 20, verbose = FALSE)
+# DimPlot(object = myeloid_merged, reduction = "pca", pt.size = .1, group.by = "technology")
+# 
+# myeloid_merged <- myeloid_merged %>% 
+#     RunHarmony(c("orig.ident","technology"), plot_convergence = TRUE)
+# DimPlot(object = myeloid_merged, reduction = "harmony", pt.size = .1, group.by = "technology")
+# 
+# myeloid_merged <- myeloid_merged %>% 
+#     RunUMAP(reduction = "harmony", dims = 1:8) %>% 
+#     FindNeighbors(reduction = "harmony", dims = 1:8) %>% 
+#     FindClusters(resolution = 0.4) %>% 
+#     identity()
+# 
+# s.genes <- cc.genes$s.genes
+# g2m.genes <- cc.genes$g2m.genes
+# myeloid_merged <- CellCycleScoring(myeloid_merged, s.features = s.genes, g2m.features = g2m.genes)
+```
+
+Read in the final version.
+
+```{r}
+myeloid_merged <- readRDS("~/CryoPD1_Myeloid.rds")
+```
+
+Plot the UMAP of the myeloid cell subclusters.
+
+**Figure 3E:**
+
+```{r}
+DimPlot(myeloid_merged, group.by = "seurat_clusters", label = TRUE)
+```
+
+Plot the distribution of the myeloid cell subclusters across each patient sample.
+
+```{r}
+metadata_order <- metadata[order(metadata$Tx, metadata$Best_response_post_cryo),]
+
+myeloid_merged$orig.ident <- factor(myeloid_merged$orig.ident, levels = c(metadata_order$SampleID))
+coul <- rev(brewer.pal(8, "RdBu"))
+coul <- colorRampPalette(coul)(11)
+```
+
+**Figure SYD (Edited in Adobe Illustrator):**
+
+```{r}
+barplot(t(table(myeloid_merged$orig.ident, myeloid_merged$seurat_clusters)/rowSums(table(myeloid_merged$orig.ident, myeloid_merged$seurat_clusters))), col = coul)
+colnames(t(table(myeloid_merged$orig.ident, myeloid_merged$seurat_clusters)/rowSums(table(myeloid_merged$orig.ident, myeloid_merged$seurat_clusters))))
+```
+
+Next, plot the frequency of selected myeloid cell clusters across best-response to cryo-ablation categories for pre-treatment samples.
+
+```{r}
+metadata_myeloid <- metadata[metadata$Tx == "Pre" & metadata$SampleID %!in% c("Pre870CD45p", "Pre870CD45n") & metadata$SS2_CD45 %!in% c("CD45n"),]
+metadata_myeloid <- metadata_myeloid[order(metadata_myeloid$SampleID),]
+myeloid_temp <- subset(myeloid_merged, subset = orig.ident %in% metadata_myeloid$SampleID)
+myeloid_temp$orig.ident <- factor(myeloid_temp$orig.ident, levels = metadata_myeloid$SampleID)
+metadata_myeloid$Cell_count <- table(myeloid_temp$orig.ident)
+lineagecounts <- table(myeloid_temp$orig.ident, myeloid_temp$seurat_clusters)
+
+metadata_myeloid$C0 <- lineagecounts[,1] / metadata_myeloid$Cell_count * 100
+metadata_myeloid$C1 <- lineagecounts[,2] / metadata_myeloid$Cell_count * 100
+metadata_myeloid$C2 <- lineagecounts[,3] / metadata_myeloid$Cell_count * 100
+metadata_myeloid$C3 <- lineagecounts[,4] / metadata_myeloid$Cell_count * 100
+metadata_myeloid$C4 <- lineagecounts[,5] / metadata_myeloid$Cell_count * 100
+metadata_myeloid$C5 <- lineagecounts[,6] / metadata_myeloid$Cell_count * 100
+metadata_myeloid$C6 <- lineagecounts[,7] / metadata_myeloid$Cell_count * 100
+metadata_myeloid$C7 <- lineagecounts[,8] / metadata_myeloid$Cell_count * 100
+metadata_myeloid$C8 <- lineagecounts[,9] / metadata_myeloid$Cell_count * 100
+metadata_myeloid$C9 <- lineagecounts[,10] / metadata_myeloid$Cell_count * 100
+metadata_myeloid$C10 <- lineagecounts[,11] / metadata_myeloid$Cell_count * 100
+
+metadata_myeloid$Best_response_post_cryo <- str_replace(metadata_myeloid$Best_response_post_cryo, " ", "")
+
+p1 <- ggplot(metadata_myeloid[metadata_myeloid$Best_response_post_cryo %in% c("PD","SD","PR"),], aes(x = factor(Best_response_post_cryo, levels = c("PD","SD","PR")), y = C4, fill = factor(Best_response_post_cryo))) + geom_boxplot(outlier.shape = NA) + geom_point(position = position_jitterdodge()) + theme_bw() + theme(legend.position = "none") + stat_compare_means() + xlab("Best Response Post-Cryo")
+p2 <- ggplot(metadata_myeloid[metadata_myeloid$Best_response_post_cryo %in% c("PD","SD","PR"),], aes(x = factor(Best_response_post_cryo, levels = c("PD","SD","PR")), y = C5, fill = factor(Best_response_post_cryo))) + geom_boxplot(outlier.shape = NA) + geom_point(position = position_jitterdodge()) + theme_bw() + theme(legend.position = "none") + stat_compare_means() + xlab("Best Response Post-Cryo")
+p3 <- ggplot(metadata_myeloid[metadata_myeloid$Best_response_post_cryo %in% c("PD","SD","PR"),], aes(x = factor(Best_response_post_cryo, levels = c("PD","SD","PR")), y = C9, fill = factor(Best_response_post_cryo))) + geom_boxplot(outlier.shape = NA) + geom_point(position = position_jitterdodge()) + theme_bw() + theme(legend.position = "none") + stat_compare_means() + xlab("Best Response Post-Cryo")
+```
+
+**Figure 3F:**
+
+```{r}
+plot_grid(p1,p2,p3,ncol=3)
+```
+
+Compute the gene markers for each cluster.
+
+```{r}
+plan()
+plan("multisession", workers = 8)
+myeloid.clustermarkers <- FindAllMarkers(myeloid_merged)
+write.xlsx(myeloid.clustermarkers, file = paste0("~/CryoPD1_Myeloid_markers.xlsx"))
+```
+
+Next we perform differential expression analyses between categories of response. First we test ultimate progressive disease vs. no progression in pre-treatment samples. As we did for the T cells, we "pseudobulk" the samples by adding all the gene counts for all myeloid cells from the same sample. Then we use DESeq2 for differential expression.
+
+```{r}
+myeloid_pseudobulk_counts <- matrix(0L, nrow = nrow(myeloid_merged@assays$RNA@counts), ncol = length(unique(as.character(myeloid_merged$orig.ident))))
+rownames(myeloid_pseudobulk_counts) <- myeloid_merged@assays$RNA@counts@Dimnames[[1]]
+colnames(myeloid_pseudobulk_counts) <- unique(as.character(myeloid_merged$orig.ident))
+
+for (i in 1:ncol(myeloid_pseudobulk_counts)){
+  temp <- subset(myeloid_merged, subset = orig.ident == colnames(myeloid_pseudobulk_counts)[i])
+  myeloid_pseudobulk_counts[,i] <- rowSums(temp@assays$RNA@counts)
+  print(i)
+}
+
+myeloid_pseudobulk_counts <- myeloid_pseudobulk_counts[,order(colnames(myeloid_pseudobulk_counts))]
+
+metadata_temp <- metadata[metadata$Tx == "Pre" & metadata$SampleID %in% colnames(myeloid_pseudobulk_counts),]
+metadata_temp <- metadata_temp[complete.cases(metadata_temp$Ultimate_PD),]
+metadata_temp <- metadata_temp[order(metadata_temp$SampleID),]
+metadata_temp$Ultimate_PD <- factor(metadata_temp$Ultimate_PD, levels = c("0","1"))
+metadata_temp$Best_response_post_cryo <- str_replace(metadata_temp$Best_response_post_cryo, " ", "")
+metadata_temp$Best_response_post_cryo <- factor(metadata_temp$Best_response_post_cryo)
+
+myeloid_pseudobulk_counts <- myeloid_pseudobulk_counts[,colnames(myeloid_pseudobulk_counts) %in% metadata_temp$SampleID]
+myeloid_pseudobulk_counts <- round(myeloid_pseudobulk_counts)
+
+dds <- DESeqDataSetFromMatrix(countData = myeloid_pseudobulk_counts, colData = metadata_temp, design = ~ Ultimate_PD)
+dds <- DESeq(dds)
+res <- as.data.frame(results(dds, name="Ultimate_PD_1_vs_0"))
+filenam <- "Myeloid_Pre_UltimatePD_1_vs_0"
+
+res$rank <- sign(res$log2FoldChange)*(-1)*log10(res$pvalue)
+res <- res[complete.cases(res),]
+res_sig <- res[res$padj < 0.05,]
+write.table(res,paste0("~/DESeq2/",filenam,".txt"),sep = "\t")
+```
+
+```{r}
+res <- read.delim("~/DESeq2/Myeloid_Pre_UltimatePD_1_vs_0.txt", sep = "\t")
+resordered <- res[order(res$rank),]
+
+log2fc <- as.numeric(resordered$log2FoldChange)
+log10p <- as.numeric(-1*log10(resordered$pvalue))
+padj <- resordered$padj
+rank <- resordered$rank
+symbol <- resordered$symbol
+combo <- cbind(log2fc,log10p,padj,rank)
+colnames(combo) <- c("log2fc","log10p","padj","rank")
+rownames(combo) <- rownames(resordered)
+combo <- as.data.frame(combo)
+combo$rank <- as.numeric(combo$rank)
+combo$log10p <- as.numeric(combo$log10p)
+combo$log2fc <- as.numeric(combo$log2fc)
+combo$significance <- as.numeric(combo$padj < 0.05)
+combo$significance <- as.factor(combo$significance)
+combo$symbol <- rownames(combo)
+
+combo$color <- 0
+combo$color[combo$significance == 1] <- 1
+
+combo$labels <- 0
+combo$labels[combo$color == 1] <- 1
+combo$labels <- as.factor(combo$labels)
+
+library(ggrepel)
+options(ggrepel.max.overlaps = Inf)
+my.cols <- brewer.pal(3,"Set2")
+plot1 <- ggplot(combo, aes(x = log2fc, y = log10p)) + geom_point(data = subset(combo, log2fc > 0 & color == 1), colour = my.cols[1]) + geom_point(data = subset(combo, log2fc < 0 & color == 1), colour = my.cols[2]) + geom_point(data = subset(combo, color == 0), colour = "grey") + geom_text_repel(data = subset(combo, labels == 1), aes(label = as.character(symbol)))  + theme_bw() + ylab("-Log10(p-value)") + xlab("Log2(FC)") + annotate("text", x=1.3, y=0, label= "No PD", colour = my.cols[1]) + annotate("text", x=-1.2, y=0, label= "PD", colour = my.cols[2]) + theme(panel.grid = element_blank()) + scale_x_continuous(breaks = seq(-30, 15, by = 5)) + scale_y_continuous(breaks = seq(0, 25, by = 5))
+```
+
+**Figure not included:**
+
+```{r}
+plot1
+#PD: SLC18A2, PDLIM1, MAST4
+#No PD: MYO7A, IL10, ANKRD22
+```
+
+We highlight some specific differentially expressed genes.
+
+**Figure SYE:**
+
+```{r}
+plotCounts(dds, "ANKRD22", intgroup = "Ultimate_PD", normalized = TRUE, transform = TRUE, xlab = "group")
+plotCounts(dds, "IL10", intgroup = "Ultimate_PD", normalized = TRUE, transform = TRUE, xlab = "group")
+plotCounts(dds, "MYO7A", intgroup = "Ultimate_PD", normalized = TRUE, transform = TRUE, xlab = "group")
+plotCounts(dds, "MAST4", intgroup = "Ultimate_PD", normalized = TRUE, transform = TRUE, xlab = "group")
+```
+
+Next we compare myeloid cells across categories of benefit from cryoablation (PD vs. SD+PR).
+
+```{r}
+metadata_temp$benefit <- factor(metadata_temp$Best_response_post_cryo %in% c("SD","PR"))
+
+dds <- DESeqDataSetFromMatrix(countData = myeloid_pseudobulk_counts, colData = metadata_temp, design = ~ benefit)
+dds <- DESeq(dds)
+res <- as.data.frame(results(dds, name="benefit_TRUE_vs_FALSE"))
+filenam <- "Myeloid_Pre_benefit_TRUE_vs_FALSE"
+
+res$rank <- sign(res$log2FoldChange)*(-1)*log10(res$pvalue)
+res <- res[complete.cases(res),]
+res_sig <- res[res$padj < 0.05,]
+write.table(res,paste0("~/DESeq2/",filenam,".txt"),sep = "\t")
+```
+
+```{r}
+res <- read.delim("~/DESeq2/Myeloid_Pre_benefit_TRUE_vs_FALSE.txt", sep = "\t")
+resordered <- res[order(res$rank),]
+
+log2fc <- as.numeric(resordered$log2FoldChange)
+log10p <- as.numeric(-1*log10(resordered$pvalue))
+padj <- resordered$padj
+rank <- resordered$rank
+symbol <- resordered$symbol
+combo <- cbind(log2fc,log10p,padj,rank)
+colnames(combo) <- c("log2fc","log10p","padj","rank")
+rownames(combo) <- rownames(resordered)
+combo <- as.data.frame(combo)
+combo$rank <- as.numeric(combo$rank)
+combo$log10p <- as.numeric(combo$log10p)
+combo$log2fc <- as.numeric(combo$log2fc)
+combo$significance <- as.numeric(combo$padj < 0.05)
+combo$significance <- as.factor(combo$significance)
+combo$symbol <- rownames(combo)
+
+combo$color <- 0
+combo$color[combo$significance == 1] <- 1
+
+combo$labels <- 0
+combo$labels[combo$color == 1] <- 1
+combo$labels <- as.factor(combo$labels)
+
+library(ggrepel)
+options(ggrepel.max.overlaps = Inf)
+my.cols <- brewer.pal(3,"Set2")
+plot1 <- ggplot(combo, aes(x = log2fc, y = log10p)) + geom_point(data = subset(combo, log2fc > 0 & color == 1), colour = my.cols[1]) + geom_point(data = subset(combo, log2fc < 0 & color == 1), colour = my.cols[2]) + geom_point(data = subset(combo, color == 0), colour = "grey") + geom_text_repel(data = subset(combo, labels == 1), aes(label = as.character(symbol)))  + theme_bw() + ylab("-Log10(p-value)") + xlab("Log2(FC)") + annotate("text", x=1.3, y=0, label= "SD+PR", colour = my.cols[1]) + annotate("text", x=-1.2, y=0, label= "PD", colour = my.cols[2]) + theme(panel.grid = element_blank()) + scale_x_continuous(breaks = seq(-30, 15, by = 5)) + scale_y_continuous(breaks = seq(0, 25, by = 5))
+```
+
+**Figure not included:**
+
+```{r}
+plot1
+```
+
+We also calculate the statistics for the differentially expressed genes between PD and SD categories of Best response post-cryo.
+
+```{r}
+metadata_temp <- metadata_temp[metadata_temp$Best_response_post_cryo %in% c("SD","PD"),]
+myeloid_pseudobulk_counts <- myeloid_pseudobulk_counts[,colnames(myeloid_pseudobulk_counts) %in% metadata_temp$SampleID]
+metadata_temp$Best_response_post_cryo <- factor(metadata_temp$Best_response_post_cryo, levels = c("PD","SD"))
+
+dds <- DESeqDataSetFromMatrix(countData = myeloid_pseudobulk_counts, colData = metadata_temp, design = ~ Best_response_post_cryo)
+dds <- DESeq(dds)
+res <- as.data.frame(results(dds, name="Best_response_post_cryo_SD_vs_PD"))
+filenam <- "Myeloid_Pre_Best_response_post_cryo_SD_vs_PD"
+
+res$rank <- sign(res$log2FoldChange)*(-1)*log10(res$pvalue)
+res <- res[complete.cases(res),]
+res_sig <- res[res$padj < 0.05,]
+write.table(res,paste0("~/DESeq2/",filenam,".txt"),sep = "\t")
+```
+
+```{r}
+res <- read.delim("~/DESeq2/Myeloid_Pre_Best_response_post_cryo_SD_vs_PD.txt", sep = "\t")
+resordered <- res[order(res$rank),]
+
+log2fc <- as.numeric(resordered$log2FoldChange)
+log10p <- as.numeric(-1*log10(resordered$pvalue))
+padj <- resordered$padj
+rank <- resordered$rank
+symbol <- resordered$symbol
+combo <- cbind(log2fc,log10p,padj,rank)
+colnames(combo) <- c("log2fc","log10p","padj","rank")
+rownames(combo) <- rownames(resordered)
+combo <- as.data.frame(combo)
+combo$rank <- as.numeric(combo$rank)
+combo$log10p <- as.numeric(combo$log10p)
+combo$log2fc <- as.numeric(combo$log2fc)
+combo$significance <- as.numeric(combo$padj < 0.05)
+combo$significance <- as.factor(combo$significance)
+combo$symbol <- rownames(combo)
+
+combo$color <- 0
+combo$color[combo$significance == 1] <- 1
+
+combo$labels <- 0
+combo$labels[combo$color == 1] <- 1
+combo$labels <- as.factor(combo$labels)
+
+library(ggrepel)
+options(ggrepel.max.overlaps = Inf)
+my.cols <- brewer.pal(3,"RdBu")
+plot1 <- ggplot(combo, aes(x = log2fc, y = log10p)) + geom_point(data = subset(combo, log2fc > 0 & color == 1), colour = my.cols[3]) + geom_point(data = subset(combo, log2fc < 0 & color == 1), colour = my.cols[1]) + geom_point(data = subset(combo, color == 0), colour = "grey") + geom_text_repel(data = subset(combo, labels == 1), aes(label = as.character(symbol)))  + theme_bw() + ylab("-Log10(p-value)") + xlab("Log2(FC)") + annotate("text", x=1.3, y=0, label= "SD", colour = my.cols[3]) + annotate("text", x=-1.2, y=0, label= "PD", colour = my.cols[1]) + theme(panel.grid = element_blank()) + scale_x_continuous(breaks = seq(-30, 15, by = 5)) + scale_y_continuous(breaks = seq(0, 30, by = 5))
+```
+
+**Figure not included:**
+
+```{r}
+plot1
+```
+
+Next we plot some of the counts to visualize the difference between Best response categories.
+
+**Figure 3G:**
+
+```{r}
+plotCounts(dds, "TNFSF15", intgroup = "Best_response_post_cryo", normalized = TRUE, transform = TRUE, xlab = "group")
+plotCounts(dds, "SLC39A8", intgroup = "Best_response_post_cryo", normalized = TRUE, transform = TRUE, xlab = "group")
+plotCounts(dds, "NR4A3", intgroup = "Best_response_post_cryo", normalized = TRUE, transform = TRUE, xlab = "group")
+plotCounts(dds, "TBC1D10C", intgroup = "Best_response_post_cryo", normalized = TRUE, transform = TRUE, xlab = "group")
+```
+
+Next we run fgsea to determine pathway enrichment for the differentially expressed genes between cryoablation benefit categories.
+
+```{r, cache = TRUE, warning = FALSE}
+resgsea <- read.delim("~/DESeq2/Myeloid_Pre_benefit_TRUE_vs_FALSE.txt",sep = "\t")
+
+ranking <- resgsea[,"rank"]
+names(ranking) <- rownames(resgsea)
+
+allgenesetgmt.file <- c(gmtPathways("~/gsea_gene_sets.gmt"))
+set.seed(15001)
+allgenesetfgseaRes <- fgsea(pathways = allgenesetgmt.file, 
+                  stats = ranking,
+                  minSize=10,
+                  maxSize=5000,
+                  eps = 0)
+allgenesetfgseaRes$LeadingEdgeGenes <- matrix(0L, nrow = nrow(allgenesetfgseaRes), ncol = 1)
+for (i in 1:nrow(allgenesetfgseaRes)){
+  allgenesetfgseaRes$LeadingEdgeGenes[i] <- as.character(paste(unlist(allgenesetfgseaRes$leadingEdge[i]), collapse = ", "))
+}
+allgenesetfgseaRes <- allgenesetfgseaRes[rev(order(allgenesetfgseaRes$NES)),]
+
+sheets <- list("PATHWAYS_GSEA" = allgenesetfgseaRes[,c(1,2,3,4,5,6,7,9)]) 
+write_xlsx(sheets, "~/GSEA_Myeloid_Pre_benefit_TRUE_vs_FALSE.xlsx")
+```
+
+```{r}
+allgenesetfgseaRes <- readxl::read_xlsx("~/GSEA_Myeloid_Pre_benefit_TRUE_vs_FALSE.xlsx")
+allgenesetfgseaResselect <- allgenesetfgseaRes[allgenesetfgseaRes$pathway %in% c("GO_FATTY_ACID_CATABOLIC_PROCESS","GO_CYTOPLASMIC_TRANSLATIONAL_INITIATION","GO_MONOCARBOXYLIC_ACID_CATABOLIC_PROCESS","GO_MRNA_PROCESSING","HALLMARK_HYPOXIA","GO_MONOCYTE_CHEMOTAXIS","HALLMARK_TNFA_SIGNALING_VIA_NFKB","HALLMARK_INTERFERON_GAMMA_RESPONSE"),]
+allgenesetfgseaResselect$idx <- rev(1:nrow(allgenesetfgseaResselect))
+allgenesetfgseaResselect$sign <- allgenesetfgseaResselect$NES > 0
+allgenesetfgseaResselect$sign <- mapvalues(allgenesetfgseaResselect$sign, from = c("FALSE","TRUE"), to = c("PD","SD"))
+
+my.cols <- brewer.pal(3,"RdBu")
+```
+
+**Figure SYF:**
+
+```{r}
+ggplot(allgenesetfgseaResselect, aes(x = factor(idx), y = NES)) + geom_col(aes(fill = sign)) + coord_flip() + theme_bw() + theme(panel.grid = element_blank()) + scale_fill_manual(values = c(my.cols[1], my.cols[3]))
+```
+
+We repeat for Ultimate response and PD vs. SD.
+
+```{r, cache = TRUE, warning = FALSE}
+resgsea <- read.delim("~/DESeq2/Myeloid_Pre_UltimatePD_1_vs_0.txt",sep = "\t")
+
+ranking <- resgsea[,"rank"]
+names(ranking) <- rownames(resgsea)
+
+allgenesetgmt.file <- c(gmtPathways("~/gsea_gene_sets.gmt"))
+set.seed(15001)
+allgenesetfgseaRes <- fgsea(pathways = allgenesetgmt.file, 
+                  stats = ranking,
+                  minSize=10,
+                  maxSize=5000,
+                  eps = 0)
+allgenesetfgseaRes$LeadingEdgeGenes <- matrix(0L, nrow = nrow(allgenesetfgseaRes), ncol = 1)
+for (i in 1:nrow(allgenesetfgseaRes)){
+  allgenesetfgseaRes$LeadingEdgeGenes[i] <- as.character(paste(unlist(allgenesetfgseaRes$leadingEdge[i]), collapse = ", "))
+}
+allgenesetfgseaRes <- allgenesetfgseaRes[rev(order(allgenesetfgseaRes$NES)),]
+
+sheets <- list("PATHWAYS_GSEA" = allgenesetfgseaRes[,c(1,2,3,4,5,6,7,9)]) 
+write_xlsx(sheets, "~/GSEA_Myeloid_Pre_UltimatePD_1_vs_0.xlsx")
+
+resgsea <- read.delim("~/DESeq2/Myeloid_Pre_Best_response_post_cryo_SD_vs_PD.txt",sep = "\t")
+
+ranking <- resgsea[,"rank"]
+names(ranking) <- rownames(resgsea)
+
+allgenesetgmt.file <- c(gmtPathways("~/gsea_gene_sets.gmt"))
+set.seed(15001)
+allgenesetfgseaRes <- fgsea(pathways = allgenesetgmt.file, 
+                  stats = ranking,
+                  minSize=10,
+                  maxSize=5000,
+                  eps = 0)
+allgenesetfgseaRes$LeadingEdgeGenes <- matrix(0L, nrow = nrow(allgenesetfgseaRes), ncol = 1)
+for (i in 1:nrow(allgenesetfgseaRes)){
+  allgenesetfgseaRes$LeadingEdgeGenes[i] <- as.character(paste(unlist(allgenesetfgseaRes$leadingEdge[i]), collapse = ", "))
+}
+allgenesetfgseaRes <- allgenesetfgseaRes[rev(order(allgenesetfgseaRes$NES)),]
+
+sheets <- list("PATHWAYS_GSEA" = allgenesetfgseaRes[,c(1,2,3,4,5,6,7,9)]) 
+write_xlsx(sheets, "~/GSEA_Myeloid_Pre_Best_response_post_cryo_SD_vs_PD.xlsx")
+```
+
+Finally, we examine the melanoma tumor cells.
+
+```{r}
+# melanocyte_merged <- subset(cryo_merged, subset = celltype_global %in% c("Melanocyte"))
+# melanocyte_merged$barcodes <- melanocyte_merged@assays$RNA@counts@Dimnames[[2]]
+# DefaultAssay(object = melanocyte_merged) <- "RNA"
+# melanocyte_merged[['SCT']] <- NULL
+# melanocyte_merged <- NormalizeData(melanocyte_merged, verbose = FALSE) %>%
+#     FindVariableFeatures(selection.method = "vst", nfeatures = 2000) %>% 
+#     ScaleData(verbose = FALSE) %>% 
+#     RunPCA(pc.genes = pbmc@var.genes, npcs = 20, verbose = FALSE)
+# DimPlot(object = melanocyte_merged, reduction = "pca", pt.size = .1, group.by = "technology")
+# 
+# melanocyte_merged <- melanocyte_merged %>% 
+#     RunHarmony(c("orig.ident","technology"), plot_convergence = TRUE)
+# DimPlot(object = melanocyte_merged, reduction = "harmony", pt.size = .1, group.by = "technology")
+# 
+# melanocyte_merged <- melanocyte_merged %>% 
+#     RunUMAP(reduction = "harmony", dims = 1:5) %>% 
+#     FindNeighbors(reduction = "harmony", dims = 1:5) %>% 
+#     FindClusters(resolution = 0.4) %>% 
+#     identity()
+# 
+# s.genes <- cc.genes$s.genes
+# g2m.genes <- cc.genes$g2m.genes
+# melanocyte_merged <- CellCycleScoring(melanocyte_merged, s.features = s.genes, g2m.features = g2m.genes)
+```
+
+Read in the final version.
+
+```{r}
+melanocyte_merged <- readRDS("~/CryoPD1_Melanocyte.rds")
+```
+
+View the UMAP of melanocytes.
+
+**Figure SYG:**
+
+```{r}
+DimPlot(melanocyte_merged, group.by = "seurat_clusters", label = TRUE) + NoLegend()
+```
+
+Compute the gene markers for each cluster.
+
+```{r}
+plan()
+plan("multisession", workers = 8)
+melanocyte.clustermarkers <- FindAllMarkers(melanocyte_merged)
+write.xlsx(melanocyte.clustermarkers, file = paste0("~/CryoPD1_Melanocyte_markers.xlsx"))
+```
+
+View the distribution of clusters by patient.
+
+```{r}
+melanocyte_merged$orig.ident <- factor(melanocyte_merged$orig.ident, levels = c(metadata_order$SampleID))
+coul <- rev(brewer.pal(8, "YlOrBr"))
+coul <- colorRampPalette(coul)(12)
+```
+
+**Figure SYH:**
+
+```{r}
+barplot(t(table(melanocyte_merged$orig.ident, melanocyte_merged$seurat_clusters)/rowSums(table(melanocyte_merged$orig.ident, melanocyte_merged$seurat_clusters))), col = coul)
+colnames(t(table(melanocyte_merged$orig.ident, melanocyte_merged$seurat_clusters)/rowSums(table(melanocyte_merged$orig.ident, melanocyte_merged$seurat_clusters))))
+```
+
+Finally, compare the composition of pre- and post-cryoablation samples based on major cell lineages.
+
+```{r}
+metadata_comp <- metadata[metadata$PatientID %in% c("690","776","880","1415"),]
+metadata_comp$Tx <- factor(metadata_comp$Tx, levels = c("Pre","Post"))
+
+p1 <- ggplot(metadata_comp, aes(x = Tx, y = T_CD45p, fill = Tx)) + geom_boxplot(outlier.shape = NA, width = 0.5) + geom_point() + geom_line(aes(group = PatientID)) + theme_bw() + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position = "none") + scale_fill_manual(values = c(blue, orange)) + scale_y_continuous(limits = c(0,100))
+p2 <- ggplot(metadata_comp, aes(x = Tx, y = BPlasma_CD45p, fill = Tx)) + geom_boxplot(outlier.shape = NA, width = 0.5) + geom_point() + geom_line(aes(group = PatientID)) + theme_bw() + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position = "none") + scale_fill_manual(values = c(blue, orange)) + scale_y_continuous(limits = c(0,100))
+p3 <- ggplot(metadata_comp, aes(x = Tx, y = Myeloid_CD45p, fill = Tx)) + geom_boxplot(outlier.shape = NA, width = 0.5) + geom_point() + geom_line(aes(group = PatientID)) + theme_bw() + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position = "none") + scale_fill_manual(values = c(blue, orange)) + scale_y_continuous(limits = c(0,100))
+```
+
+**Figure 3I:**
+
+```{r}
+cowplot::plot_grid(p1,p2,p3,ncol=3)
+```
+
+```{r}
+sessionInfo()
+```
